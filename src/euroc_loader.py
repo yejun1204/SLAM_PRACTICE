@@ -137,13 +137,15 @@ class EuRoCLoader:
 
 
 if __name__ == '__main__':
-    # Test the loader
+    # Test the loader with distortion comparison
     loader = EuRoCLoader('data/MH_01_easy')
 
     print(f"\nCamera matrix K:\n{loader.K}")
+    print(f"\nDistortion coefficients: {loader.dist_coeffs}")
     print(f"\nTotal images: {len(loader)}")
 
     print("\nPress SPACE for next image, 'q' to quit")
+    print("Left: Original (with distortion) | Right: Undistorted")
 
     # Iterate through images using for loop
     for img, timestamp, idx in loader:
@@ -155,8 +157,20 @@ if __name__ == '__main__':
         print(f"  Shape: {img.shape}")
         print(f"  Timestamp: {timestamp}")
 
+        # Undistort the entire image
+        img_undistorted = cv2.undistort(img, loader.K, loader.dist_coeffs)
+
+        # Concatenate side by side
+        comparison = np.hstack([img, img_undistorted])
+
+        # Add labels
+        cv2.putText(comparison, "Original", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(comparison, "Undistorted", (img.shape[1] + 10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
         # Display
-        cv2.imshow('EuRoC Image', img)
+        cv2.imshow('Distortion Comparison', comparison)
 
         key = cv2.waitKey(0)
         if key == ord('q'):
