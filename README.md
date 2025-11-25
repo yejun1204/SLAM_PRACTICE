@@ -17,7 +17,7 @@ SLAM_PRACTICE/
 │   └── system.py          # Main system
 ├── examples/               # Example programs
 ├── config/                 # Configuration files
-├── data/                   # Dataset (TUM, EuRoC, etc.)
+├── data/                   # Dataset (EuRoC, etc.)
 └── reference/              # ORB-SLAM3 reference code
 ```
 
@@ -52,7 +52,10 @@ This project uses the EuRoC MAV dataset:
 - **Camera**: cam0 (monocular)
 - **Download**: https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets
 
-The dataset is linked to `data/MH_01_easy` for easy access.
+To link the dataset to the project:
+```bash
+ln -sf ~/MH_01_easy data/MH_01_easy
+```
 
 ## Usage
 
