@@ -78,7 +78,7 @@ def main():
             continue
 
         # Extract ORB features
-        keypoints, descriptors = orb.detectAndCompute(img, None)
+        keypoints, descriptors = orb.detectAndCompute(img, None) # (img, mask=None)
 
         print(f"\nImage {idx}/{len(loader)-1}")
         print(f"  Timestamp: {timestamp}")
@@ -89,7 +89,7 @@ def main():
             responses = [kp.response for kp in keypoints]
             sizes = [kp.size for kp in keypoints]
 
-            print(f"  Response: min={min(responses):.2f}, max={max(responses):.2f}, mean={np.mean(responses):.2f}")
+            print(f"  Response: min={min(responses):.6f}, max={max(responses):.6f}, mean={np.mean(responses):.6f}")
             print(f"  Size: min={min(sizes):.2f}, max={max(sizes):.2f}, mean={np.mean(sizes):.2f}")
 
         # Visualize
