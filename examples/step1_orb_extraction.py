@@ -79,6 +79,8 @@ def main():
 
         # Extract ORB features
         keypoints, descriptors = orb.detectAndCompute(img, None) # (img, mask=None)
+        # keypoint detect : FAST corner detector 사용 /// score : harris score(harris corner detector 사용 image patch 주변부의 코너 강도 측정)
+        # descriptor compute : oriented BRIEF 디스크립터 사용 32 bytes 길이의 binary string 생성
 
         print(f"\nImage {idx}/{len(loader)-1}")
         print(f"  Timestamp: {timestamp}")
