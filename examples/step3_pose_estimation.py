@@ -69,7 +69,7 @@ def estimate_pose(kp1, kp2, matches, K, dist_coeffs):
         pts1_undist, pts2_undist, K,
         method=cv2.RANSAC,
         prob=0.999,
-        threshold=5.0
+        threshold=2.0
     )
 
     # Recover pose (R, t) from Essential matrix
@@ -124,12 +124,14 @@ def visualize_pose_estimation(img1, img2, kp1, kp2, matches, mask, R, t):
     cv2.imshow("Pose Estimation - Green: Inliers, Red: Outliers", img_matches)
 
 
-def plot_trajectory(trajectory, current_idx):
+def plot_trajectory(trajectory, trajectory_poses, current_idx):
     """
-    Plot camera trajectory in X-Z plane (top view) and Z-(-Y) plane (side view)
+    Plot camera trajectory in X-Z plane (top view) and Z-Y plane (side view)
+    Also draws camera coordinate axes at current position
 
     Args:
         trajectory: List of 3D positions
+        trajectory_poses: List of 4x4 pose matrices
         current_idx: Current frame index
     """
     if len(trajectory) < 2:
@@ -179,6 +181,26 @@ def plot_trajectory(trajectory, current_idx):
     current_pt = to_canvas_xz(trajectory[-1, 0], trajectory[-1, 2])
     cv2.circle(canvas, current_pt, 6, (0, 0, 255), -1)
 
+    # Draw camera axes at current position (X-Z plane: X and Z axes only)
+    if len(trajectory_poses) > 0:
+        current_pose = trajectory_poses[-1]
+        R = current_pose[:3, :3]
+        t = current_pose[:3, 3]
+
+        # Adaptive axis length: 10% of the current trajectory range
+        axis_length = max(x_range, z_range) * 0.1
+
+        # X axis (red) - project onto X-Z plane
+        x_axis_end = t + R[:, 0] * axis_length  # First column of R
+        pt_origin = to_canvas_xz(t[0], t[2])
+        pt_x_end = to_canvas_xz(x_axis_end[0], x_axis_end[2])
+        cv2.arrowedLine(canvas, pt_origin, pt_x_end, (0, 0, 255), 2, tipLength=0.3)
+
+        # Z axis (blue) - project onto X-Z plane
+        z_axis_end = t + R[:, 2] * axis_length  # Third column of R
+        pt_z_end = to_canvas_xz(z_axis_end[0], z_axis_end[2])
+        cv2.arrowedLine(canvas, pt_origin, pt_z_end, (255, 0, 0), 2, tipLength=0.3)
+
     # ===== Right: Z-Y plane (Side View) =====
     cv2.putText(canvas, "Z-Y Plane (Side View)",
                 (610, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
@@ -212,6 +234,26 @@ def plot_trajectory(trajectory, current_idx):
 
     current_pt_zy = to_canvas_zy(trajectory[-1, 2], trajectory[-1, 1])
     cv2.circle(canvas, current_pt_zy, 6, (0, 0, 255), -1)
+
+    # Draw camera axes at current position (Z-Y plane: Z and Y axes only)
+    if len(trajectory_poses) > 0:
+        current_pose = trajectory_poses[-1]
+        R = current_pose[:3, :3]
+        t = current_pose[:3, 3]
+
+        # Adaptive axis length: 10% of the current trajectory range
+        axis_length_zy = max(z_range2, y_range) * 0.1
+
+        # Z axis (blue) - project onto Z-Y plane
+        z_axis_end = t + R[:, 2] * axis_length_zy  # Third column of R
+        pt_origin_zy = to_canvas_zy(t[2], t[1])
+        pt_z_end_zy = to_canvas_zy(z_axis_end[2], z_axis_end[1])
+        cv2.arrowedLine(canvas, pt_origin_zy, pt_z_end_zy, (255, 0, 0), 2, tipLength=0.3)
+
+        # Y axis (green) - project onto Z-Y plane
+        y_axis_end = t + R[:, 1] * axis_length_zy  # Second column of R
+        pt_y_end_zy = to_canvas_zy(y_axis_end[2], y_axis_end[1])
+        cv2.arrowedLine(canvas, pt_origin_zy, pt_y_end_zy, (0, 255, 0), 2, tipLength=0.3)
 
     # Add coordinate info at bottom
     cv2.putText(canvas, f"Position: X={trajectory[-1, 0]:.3f}, Y={trajectory[-1, 1]:.3f}, Z={trajectory[-1, 2]:.3f}",
@@ -253,8 +295,10 @@ def main():
 
     # Track camera trajectory
     trajectory = []
+    trajectory_poses = []  # Store full 4x4 poses for drawing axes
     current_pose = np.eye(4)  # 4x4 transformation matrix
     trajectory.append(current_pose[:3, 3].copy())
+    trajectory_poses.append(current_pose.copy())
 
     prev_img = None
     prev_kp = None
@@ -287,14 +331,18 @@ def main():
                 print(f"  Rotation (Rodrigues): {cv2.Rodrigues(R)[0].ravel()}")
                 print(f"  Translation: {t.ravel()}")
 
+                if inlier_count < 20:
+                    print("  Not enough inliers after RANSAC!")
+                    continue
                 # Update camera pose (accumulate transformations)
                 T = np.eye(4)
                 T[:3, :3] = R
                 T[:3, 3:4] = t
-                current_pose = current_pose @ T
+                current_pose = current_pose @ np.linalg.inv(T)
 
                 # Store trajectory
                 trajectory.append(current_pose[:3, 3].copy())
+                trajectory_poses.append(current_pose.copy())
 
                 # Visualize matches
                 visualize_pose_estimation(
@@ -302,7 +350,7 @@ def main():
                 )
 
                 # Plot trajectory in real-time
-                plot_trajectory(trajectory, idx)
+                plot_trajectory(trajectory, trajectory_poses, idx)
             else:
                 print("  Not enough matches for pose estimation!")
 
