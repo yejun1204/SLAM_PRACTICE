@@ -73,6 +73,9 @@ def estimate_pose(kp1, kp2, matches, K, dist_coeffs):
     )
 
     # Recover pose (R, t) from Essential matrix
+    # Returns: T^2_1 = [R^2_1 | t^2_2->1]
+    # where R^2_1: rotation from cam1 to cam2
+    #       t^2_2->1: position of cam1's origin in cam2's frame
     _, R, t, mask_pose = cv2.recoverPose(E, pts1_undist, pts2_undist, K, mask=mask)
 
     return R, t, mask_pose, pts1_undist, pts2_undist
@@ -334,10 +337,16 @@ def main():
                 if inlier_count < 20:
                     print("  Not enough inliers after RANSAC!")
                     continue
+
                 # Update camera pose (accumulate transformations)
+                # Build transformation matrix T^2_1 = [R^2_1 | t^2_2->1]
                 T = np.eye(4)
                 T[:3, :3] = R
                 T[:3, 3:4] = t
+
+                # Update world pose:
+                # current_pose = T^w_cam (world to current camera)
+                # We need T^w_cam2 = T^w_cam1 @ T^1_2 = T^w_cam1 @ inv(T^2_1)
                 current_pose = current_pose @ np.linalg.inv(T)
 
                 # Store trajectory

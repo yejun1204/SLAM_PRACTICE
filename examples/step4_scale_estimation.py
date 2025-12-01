@@ -121,6 +121,9 @@ def estimate_pose(kp1, kp2, matches, K, dist_coeffs):
     )
 
     # Recover pose (R, t) from Essential matrix
+    # Returns: T^2_1 = [R^2_1 | t^2_2->1]
+    # where R^2_1: rotation from cam1 to cam2
+    #       t^2_2->1: position of cam1's origin in cam2's frame
     _, R, t, mask_pose = cv2.recoverPose(E, pts1_undist, pts2_undist, K, mask=mask)
 
     return R, t, mask_pose, pts1_undist, pts2_undist
@@ -131,19 +134,19 @@ def triangulate_points(R1, t1, R2, t2, pts1, pts2, K):
     Triangulate 3D points from two views
 
     Args:
-        R1, t1: Camera 1 pose (rotation and translation)
-        R2, t2: Camera 2 pose
+        R1, t1: Camera 1 pose - T^1_w = [R^1_w | t^1_w->o] (world to cam1)
+        R2, t2: Camera 2 pose - T^2_w = [R^2_w | t^2_w->o] (world to cam2)
         pts1, pts2: 2D point correspondences (Nx2)
         K: Camera intrinsic matrix
 
     Returns:
-        points_3d: Triangulated 3D points (Nx3) in camera 1 coordinate frame
+        points_3d: Triangulated 3D points (Nx3) in world coordinate frame
         valid_mask: Boolean mask for valid points (positive depth)
     """
     # Construct projection matrices
-    # P1 = K * [R1 | t1]
+    # P1 = K * T^1_w: world -> image1
     P1 = K @ np.hstack([R1, t1.reshape(-1, 1)])
-    # P2 = K * [R2 | t2]
+    # P2 = K * T^2_w: world -> image2
     P2 = K @ np.hstack([R2, t2.reshape(-1, 1)])
 
     # Triangulate
@@ -397,6 +400,7 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
         return current_pose, False
 
     # ===== Step 4: Estimate relative pose (R, t) =====
+    # T^cam2_cam1= [R|t] 
     R, t, mask, pts1_undist, pts2_undist = estimate_pose(
         kp1, kp2, matches, loader.K, loader.dist_coeffs
     )
@@ -413,7 +417,9 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
     pts1_inliers = pts1_undist[mask.ravel().astype(bool)]
     pts2_inliers = pts2_undist[mask.ravel().astype(bool)]
 
-    # Triangulate in normalized camera coordinates (first camera at origin)
+    # Triangulate in normalized camera coordinates (camera1 = world origin)
+    # T^1_w = [I | 0]: camera1 is the world frame
+    # T^2_w = T^2_1 = [R^2_1 | t^2_2->1]: camera2 relative to camera1(=world)
     R1 = np.eye(3)
     t1 = np.zeros(3)
     points_3d, valid_mask = triangulate_points(R1, t1, R, t, pts1_inliers, pts2_inliers, loader.K)
@@ -421,9 +427,10 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
     valid_count = np.sum(valid_mask)
     print(f"  Valid 3D points: {valid_count}/{len(points_3d)}")
 
-    # Store inlier matches and 3D points for scale estimation
+    # Store inlier matches, 3D points, and transformation for scale estimation
     matches_buffer.append(inlier_matches)
-    points_3d_buffer.append(points_3d[valid_mask])
+    # Store (3D points, R, t) tuple - points are in first camera frame of the pair
+    points_3d_buffer.append((points_3d[valid_mask], R.copy(), t.copy()))
 
     if len(matches_buffer) > 2:
         matches_buffer.pop(0)
@@ -437,25 +444,47 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
         common_12_idx, common_23_idx = find_common_matches(matches_buffer[0], matches_buffer[1])
 
         if len(common_12_idx) >= 5:
+            # Extract 3D points and transformations
+            points_3d_12, R_21, t_21 = points_3d_buffer[0]  # Frame1-2 pair, points in frame1 coords
+            points_3d_23, R_32, t_32 = points_3d_buffer[1]  # Frame2-3 pair, points in frame2 coords
+
+            # Transform points_3d_23 from frame2 to frame1 coordinates
+            # R_21, t_21 form T^2_1 = [R^2_1 | t^2_2->1] (frame2 relative to frame1)
+            # We need T^1_2 = inv(T^2_1) to transform frame2 points to frame1
+            R_12 = R_21.T  # R^1_2 = (R^2_1)^T
+            t_12 = -R_12 @ t_21  # t^1_1->2
+
+            # Transform common points from frame2 to frame1
+            points_3d_23_common = points_3d_23[common_23_idx]
+            points_3d_23_in_frame1 = (R_12 @ points_3d_23_common.T).T + t_12.ravel()
+
+            # Now both point sets are in frame1 coordinates
+            points_3d_12_common = points_3d_12[common_12_idx]
+
             # Estimate scale from median depth ratio of common 3D points
             scale, num_common = estimate_scale_from_depth_ratio(
-                points_3d_buffer[0], points_3d_buffer[1],
-                (np.array(common_12_idx), np.array(common_23_idx))
+                points_3d_12_common, points_3d_23_in_frame1,
+                (np.arange(len(common_12_idx)), np.arange(len(common_23_idx)))
             )
             print(f"  Scale estimated from {num_common} common points: {scale:.6f}")
         else:
             print(f"  Not enough common points ({len(common_12_idx)}), using scale=1.0")
 
     # ===== Step 7: Apply scale and update camera pose =====
-    scaled_t = t * scale
-    print(f"  Scaled translation: {scaled_t.ravel()}")
+    # scale = depths_curr / depths_prev
+    # To make current translation consistent with previous scale, divide by scale
+    scaled_t = t / scale
+    print(f"  Scaled translation: {scaled_t.ravel()} (scale factor: {scale:.6f})")
 
-    # Build transformation matrix T (camera2 relative to camera1)
+    # Build transformation matrix T^2_1 = [R^2_1 | t^2_2->1]
+    # This represents camera2's pose relative to camera1
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3:4] = scaled_t
 
-    # Update world pose: multiply by inverse to get camera position in world frame
+    # Update world pose:
+    # current_pose = T^w_cam (world to current camera)
+    # We need T^w_cam2 = T^w_cam1 @ T^1_2 = T^w_cam1 @ inv(T^2_1)
     current_pose = current_pose @ np.linalg.inv(T)
 
     # Store trajectory
