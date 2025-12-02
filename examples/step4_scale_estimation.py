@@ -170,17 +170,23 @@ def triangulate_points(R1, t1, R2, t2, pts1, pts2, K):
     return points_3d, valid_mask
 
 
-def estimate_scale_from_depth_ratio(points_3d_prev, points_3d_curr, common_indices):
+def estimate_scale_from_translation_ratio(t_prev_norm, points_3d_prev, points_3d_curr, common_indices):
     """
-    Estimate scale using median depth ratio of common 3D points
+    Estimate relative scale using translation distance ratio
+
+    The idea: If the camera moved twice as far in the current frame pair compared to
+    the previous frame pair, the scale should be 2.0.
+
+    We estimate this by comparing the median distances of common 3D points.
 
     Args:
+        t_prev_norm: Norm of translation vector from previous frame pair
         points_3d_prev: 3D points from previous frame pair (Nx3)
         points_3d_curr: 3D points from current frame pair (Mx3)
         common_indices: Tuple of (indices_prev, indices_curr) for common points
 
     Returns:
-        scale: Median depth ratio
+        scale_ratio: Ratio of translation distances (curr/prev)
         num_common: Number of common points used
     """
     idx_prev, idx_curr = common_indices
@@ -188,23 +194,27 @@ def estimate_scale_from_depth_ratio(points_3d_prev, points_3d_curr, common_indic
     if len(idx_prev) < 5:
         return 1.0, 0
 
-    # Get depths (Z coordinates)
-    depths_prev = points_3d_prev[idx_prev, 2]
-    depths_curr = points_3d_curr[idx_curr, 2]
+    # Get common 3D points
+    pts_prev = points_3d_prev[idx_prev]
+    pts_curr = points_3d_curr[idx_curr]
 
-    # Compute depth ratios
-    # Filter out small depths to avoid numerical issues
-    valid = (np.abs(depths_prev) > 0.1) & (np.abs(depths_curr) > 0.1)
+    # Compute distances from camera origin
+    dists_prev = np.linalg.norm(pts_prev, axis=1)
+    dists_curr = np.linalg.norm(pts_curr, axis=1)
+
+    # Filter out points too close to camera
+    valid = (dists_prev > 0.5) & (dists_curr > 0.5)
 
     if np.sum(valid) < 5:
         return 1.0, 0
 
-    ratios = depths_curr[valid] / depths_prev[valid]
+    # Compute distance ratios
+    ratios = dists_prev[valid] / dists_curr[valid]
 
     # Use median for robustness
-    scale = np.median(ratios)
+    scale_ratio = np.median(ratios)
 
-    return scale, np.sum(valid)
+    return scale_ratio, np.sum(valid)
 
 
 def find_common_matches(matches_12, matches_23):
@@ -376,13 +386,19 @@ def plot_trajectory(trajectory, trajectory_poses, current_idx):
 
 
 def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
-                       loader, current_pose, trajectory, trajectory_poses):
+                       loader, current_pose, trajectory, trajectory_poses, accumulated_scale):
     """
     Process a pair of consecutive frames for pose estimation and scale calculation
+
+    Args:
+        accumulated_scale: Previously accumulated scale value
 
     Returns:
         updated_pose: Updated camera pose after processing this frame pair
         should_quit: Whether user requested to quit
+        new_accumulated_scale: Updated accumulated scale
+        success: Whether processing succeeded (True means add to buffers)
+        result_data: Dictionary containing frame pair data if successful
     """
     # ===== Step 2: Get consecutive frame pair =====
     img1, kp1, desc1, idx1 = frame_buffer[-2]
@@ -396,11 +412,11 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
     print(f"  Matches found: {len(matches)}")
 
     if len(matches) < 8:
-        print("  Not enough matches!")
-        return current_pose, False
+        print("  Not enough matches! Skipping frame...")
+        return current_pose, False, accumulated_scale, False, None
 
     # ===== Step 4: Estimate relative pose (R, t) =====
-    # T^cam2_cam1= [R|t] 
+    # T^cam2_cam1= [R|t]
     R, t, mask, pts1_undist, pts2_undist = estimate_pose(
         kp1, kp2, matches, loader.K, loader.dist_coeffs
     )
@@ -409,8 +425,8 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
     print(f"  Inliers: {inlier_count}/{len(matches)} ({inlier_count/len(matches)*100:.1f}%)")
 
     if inlier_count < 20:
-        print("  Not enough inliers after RANSAC!")
-        return current_pose, False
+        print("  Not enough inliers after RANSAC! Skipping frame...")
+        return current_pose, False, accumulated_scale, False, None
 
     # ===== Step 5: Triangulate 3D points from inliers =====
     inlier_matches = [m for i, m in enumerate(matches) if mask[i]]
@@ -427,54 +443,66 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
     valid_count = np.sum(valid_mask)
     print(f"  Valid 3D points: {valid_count}/{len(points_3d)}")
 
-    # Store inlier matches, 3D points, and transformation for scale estimation
-    matches_buffer.append(inlier_matches)
-    # Store (3D points, R, t) tuple - points are in first camera frame of the pair
-    points_3d_buffer.append((points_3d[valid_mask], R.copy(), t.copy()))
-
-    if len(matches_buffer) > 2:
-        matches_buffer.pop(0)
-    if len(points_3d_buffer) > 2:
-        points_3d_buffer.pop(0)
-
     # ===== Step 6: Estimate scale (requires 3 frames) =====
-    scale = 1.0  # Default: no scale information
-    if len(frame_buffer) == 3 and len(matches_buffer) == 2 and len(points_3d_buffer) == 2:
-        # Find common feature tracks across 3 frames (frame1->frame2->frame3)
-        common_12_idx, common_23_idx = find_common_matches(matches_buffer[0], matches_buffer[1])
+    scale_ratio = 1.0  # Default: no scale correction
+    t_norm = np.linalg.norm(t)
+
+    # We need at least 1 previous frame pair in buffer to estimate scale
+    # matches_buffer[-1] and inlier_matches form two consecutive pairs
+    if len(matches_buffer) >= 1 and len(points_3d_buffer) >= 1:
+        # Find common feature tracks across 3 frames
+        # matches_buffer[-1]: matches between frame(n-1) and frame(n) - the PREVIOUS pair
+        # inlier_matches: matches between frame(n) and frame(n+1) - the CURRENT pair
+        common_12_idx, common_23_idx = find_common_matches(matches_buffer[-1], inlier_matches)
 
         if len(common_12_idx) >= 5:
-            # Extract 3D points and transformations
-            points_3d_12, R_21, t_21 = points_3d_buffer[0]  # Frame1-2 pair, points in frame1 coords
-            points_3d_23, R_32, t_32 = points_3d_buffer[1]  # Frame2-3 pair, points in frame2 coords
+            # Extract 3D points and transformations from previous pair
+            points_3d_12, R_21, t_21 = points_3d_buffer[-1]  # Frame(n-1)-n pair, in frame(n-1) coords
+            # Note: t_21 has unit norm, points_3d_12 are triangulated with this normalized translation
 
-            # Transform points_3d_23 from frame2 to frame1 coordinates
-            # R_21, t_21 form T^2_1 = [R^2_1 | t^2_2->1] (frame2 relative to frame1)
-            # We need T^1_2 = inv(T^2_1) to transform frame2 points to frame1
-            R_12 = R_21.T  # R^1_2 = (R^2_1)^T
-            t_12 = -R_12 @ t_21  # t^1_1->2
+            # Current pair: points_3d (frame n to n+1), in frame(n) coords
+            # Note: t has unit norm, points_3d are triangulated with this normalized translation
 
-            # Transform common points from frame2 to frame1
-            points_3d_23_common = points_3d_23[common_23_idx]
-            points_3d_23_in_frame1 = (R_12 @ points_3d_23_common.T).T + t_12.ravel()
-
-            # Now both point sets are in frame1 coordinates
+            # Transform previous 3D points from frame(n-1) to frame(n) coordinates
+            # R_21, t_21 form T^n_(n-1) (transformation from frame(n-1) to frame n)
+            # To transform points: p_n = R_21 @ p_(n-1) + t_21
             points_3d_12_common = points_3d_12[common_12_idx]
+            points_3d_12_in_frame_n = (R_21 @ points_3d_12_common.T).T + t_21.ravel()
 
-            # Estimate scale from median depth ratio of common 3D points
-            scale, num_common = estimate_scale_from_depth_ratio(
-                points_3d_12_common, points_3d_23_in_frame1,
-                (np.arange(len(common_12_idx)), np.arange(len(common_23_idx)))
-            )
-            print(f"  Scale estimated from {num_common} common points: {scale:.6f}")
+            # Current pair's 3D points (already in frame n)
+            points_3d_23_common = points_3d[valid_mask][common_23_idx]
+
+            # Both point sets now represent THE SAME physical points observed from frame n
+            # The depth ratio gives us the scale correction needed
+            depths_12_in_n = points_3d_12_in_frame_n[:, 2]  # Z coordinate = depth
+            depths_23_in_n = points_3d_23_common[:, 2]
+
+            # Filter valid depths
+            valid_depths = (np.abs(depths_12_in_n) > 0.1) & (np.abs(depths_23_in_n) > 0.1)
+
+            if np.sum(valid_depths) >= 5:
+                # Scale ratio: how much should we scale the current translation?
+                # If depths_12 (from previous scaled translation) > depths_23 (unit translation),
+                # we need to scale up the current translation
+                depth_ratios = depths_12_in_n[valid_depths] / depths_23_in_n[valid_depths]
+                scale_ratio = np.median(depth_ratios)
+                print(f"  Scale ratio: {scale_ratio:.6f} from {np.sum(valid_depths)} common points")
+            else:
+                print(f"  Not enough valid depths, using scale_ratio=1.0")
         else:
-            print(f"  Not enough common points ({len(common_12_idx)}), using scale=1.0")
+            print(f"  Not enough common points ({len(common_12_idx)}), using scale_ratio=1.0")
+    else:
+        # First frame pair, no previous pair to compare with
+        print(f"  First frame pair, using scale_ratio=1.0")
 
     # ===== Step 7: Apply scale and update camera pose =====
-    # scale = depths_curr / depths_prev
-    # To make current translation consistent with previous scale, divide by scale
-    scaled_t = t / scale
-    print(f"  Scaled translation: {scaled_t.ravel()} (scale factor: {scale:.6f})")
+    # Accumulate scale: new_scale = accumulated_scale * scale_ratio
+    new_accumulated_scale = accumulated_scale * scale_ratio
+
+    # Apply accumulated scale to current translation
+    scaled_t = t * new_accumulated_scale
+    print(f"  Translation norm: {t_norm:.3f}, scale ratio: {scale_ratio:.3f}, accumulated scale: {new_accumulated_scale:.3f}")
+    print(f"  Scaled translation: {scaled_t.ravel()}")
 
     # Build transformation matrix T^2_1 = [R^2_1 | t^2_2->1]
     # This represents camera2's pose relative to camera1
@@ -493,18 +521,28 @@ def process_frame_pair(frame_buffer, matches_buffer, points_3d_buffer,
 
     # ===== Step 8: Visualization =====
     # Show feature matches with inliers/outliers
-    visualize_pose_estimation(img1, img2, kp1, kp2, matches, mask, R, t, scale)
+    visualize_pose_estimation(img1, img2, kp1, kp2, matches, mask, R, t, new_accumulated_scale)
 
     # Show camera trajectory in 2D projections
     plot_trajectory(trajectory, trajectory_poses, idx2)
+
+    # Store current frame's data for next scale estimation
+    # inlier_matches: matches between current frame pair
+    # (points_3d, R, t): 3D points triangulated in first camera's frame
+    result_data = {
+        'inlier_matches': inlier_matches,
+        'points_3d': points_3d[valid_mask],
+        'R': R.copy(),
+        't': t.copy()
+    }
 
     # Wait for key press
     key = cv2.waitKey(1)
     if key == ord('q'):
         print("\nQuitting...")
-        return current_pose, True
+        return current_pose, True, new_accumulated_scale, True, result_data
 
-    return current_pose, False
+    return current_pose, False, new_accumulated_scale, True, result_data
 
 
 def main():
@@ -544,10 +582,11 @@ def main():
     trajectory_poses.append(current_pose.copy())
 
     # ===== Frame buffer for scale estimation =====
-    # We need 3 consecutive frames to estimate scale via triangulation
-    frame_buffer = []         # Store (img, kp, desc, idx) for last 3 frames
-    matches_buffer = []       # Store inlier matches between consecutive frames
-    points_3d_buffer = []     # Store triangulated 3D points
+    # Only successfully matched frames are stored in these buffers
+    prev_frame = None         # Previous successfully matched frame (img, kp, desc, idx)
+    matches_buffer = []       # Store inlier matches between consecutive frame pairs
+    points_3d_buffer = []     # Store (3D points, R, t) for consecutive frame pairs
+    accumulated_scale = 1.0   # Accumulated scale factor
 
     for img, timestamp, idx in loader:
         if img is None:
@@ -558,20 +597,34 @@ def main():
         if descriptors is None:
             continue
 
-        # Add current frame to buffer
-        frame_buffer.append((img, keypoints, descriptors, idx))
-        if len(frame_buffer) > 3:
-            frame_buffer.pop(0)  # Keep only last 3 frames
+        current_frame = (img, keypoints, descriptors, idx)
 
-        # Need at least 2 frames for pose estimation
-        if len(frame_buffer) < 2:
+        # Need a previous frame for pose estimation
+        if prev_frame is None:
+            prev_frame = current_frame
             continue
 
+        # Build temporary frame buffer for processing
+        frame_buffer = [prev_frame, current_frame]
+
         # Process frame pair for pose estimation and scale calculation
-        current_pose, should_quit = process_frame_pair(
+        current_pose, should_quit, accumulated_scale, success, result_data = process_frame_pair(
             frame_buffer, matches_buffer, points_3d_buffer,
-            loader, current_pose, trajectory, trajectory_poses
+            loader, current_pose, trajectory, trajectory_poses, accumulated_scale
         )
+
+        # Only update prev_frame and buffers if processing was successful
+        if success:
+            prev_frame = current_frame  # Move to next frame only on success
+            matches_buffer.append(result_data['inlier_matches'])
+            points_3d_buffer.append((result_data['points_3d'], result_data['R'], result_data['t']))
+
+            # Keep only last 1 pair for scale estimation (we compare with current pair)
+            if len(matches_buffer) > 1:
+                matches_buffer.pop(0)
+            if len(points_3d_buffer) > 1:
+                points_3d_buffer.pop(0)
+        # If failed, keep prev_frame unchanged and try again with next frame
 
         if should_quit:
             break
