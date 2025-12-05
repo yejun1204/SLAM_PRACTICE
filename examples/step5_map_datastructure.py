@@ -320,6 +320,22 @@ def main():
         print(f"  Valid 3D points: {valid_count}/{len(points_3d)}")
 
         # Create MapPoints and add observations
+        # NOTE: 현재는 데이터 구조 테스트용으로 중복 체크 없이 무조건 새로 생성합니다.
+        # 실제 SLAM에서는 다음과 같이 중복 체크가 필요합니다:
+        #
+        # existing_mp = kf1_pose.mappoints[m.queryIdx]
+        # if existing_mp is not None:
+        #     # 이미 존재하는 MapPoint에 새로운 관측만 추가
+        #     existing_mp.add_observation(kf2_pose, m.trainIdx)
+        #     kf2_pose.add_mappoint(existing_mp, m.trainIdx)
+        # else:
+        #     # 새로운 MapPoint 생성
+        #
+        # 현재 방식의 문제:
+        # Frame 0-1: Frame0의 kp[5] + Frame1의 kp[10] → MapPoint_A 생성
+        # Frame 1-2: Frame1의 kp[10] + Frame2의 kp[20] → MapPoint_B 생성 (중복!)
+        # → Frame1의 kp[10]이 MapPoint_A와 MapPoint_B 두 개와 연결되어 중복됨
+
         for j, m in enumerate(inlier_matches):
             if not valid_mask[j]:
                 continue
