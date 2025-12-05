@@ -134,8 +134,10 @@ def triangulate_points(R1, t1, R2, t2, pts1, pts2, K):
     Triangulate 3D points from two views
 
     Args:
-        R1, t1: Camera 1 pose - T^1_w = [R^1_w | t^1_w->o] (world to cam1)
-        R2, t2: Camera 2 pose - T^2_w = [R^2_w | t^2_w->o] (world to cam2)
+        R1, t1: Camera 1 pose - T^1_w = [R^1_w | t^1_w] (world to cam1)
+                where t^1_w is world origin in cam1 frame
+        R2, t2: Camera 2 pose - T^2_w = [R^2_w | t^2_w] (world to cam2)
+                where t^2_w is world origin in cam2 frame
         pts1, pts2: 2D point correspondences (Nx2)
         K: Camera intrinsic matrix
 
