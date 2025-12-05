@@ -76,8 +76,8 @@ class KeyFrame:
         # Bad flag
         self.is_bad = False
 
-        # Thread safety
-        self.lock = threading.Lock()
+        # Thread safety (RLock allows reentrant locking from same thread)
+        self.lock = threading.RLock()
 
         # Undistort keypoints once
         self.keypoints_undistorted = self._undistort_keypoints()

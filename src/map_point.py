@@ -49,8 +49,8 @@ class MapPoint:
         # Bad flag (for culling)
         self.is_bad = False
 
-        # Thread safety
-        self.lock = threading.Lock()
+        # Thread safety (RLock allows reentrant locking from same thread)
+        self.lock = threading.RLock()
 
     def get_position(self):
         """Get 3D position (thread-safe)"""

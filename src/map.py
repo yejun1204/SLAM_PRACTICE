@@ -26,8 +26,8 @@ class Map:
         # Maximum KeyFrame ID (for ordering)
         self.max_keyframe_id = 0
 
-        # Thread safety
-        self.lock = threading.Lock()
+        # Thread safety (RLock allows reentrant locking from same thread)
+        self.lock = threading.RLock()
 
     def add_mappoint(self, mappoint):
         """
