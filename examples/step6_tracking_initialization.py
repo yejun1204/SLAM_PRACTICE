@@ -276,20 +276,17 @@ def main():
                 )
 
                 # Current KeyFrame with relative pose
-                # Initializer returns R, t as T_21 (cam2 to cam1)
-                # T_wc1 = I (cam1 = world)
-                # T_wc2 = T_wc1 @ inv(T_21) = inv(T_21)
-                T_21 = np.eye(4)
-                T_21[:3, :3] = result['R']
-                T_21[:3, 3:4] = result['t']
-                T_wc2 = np.linalg.inv(T_21)
-                # KeyFrame needs T_cw = inv(T_wc)
-                T_cw = np.linalg.inv(T_wc2)
+                # recoverPose returns R, t as T_21 (cam1 → cam2)
+                # Since cam1 = world, T_21 = T_c2w directly
+                # KeyFrame stores T_cw (world to camera)
+                T_c2w = np.eye(4)
+                T_c2w[:3, :3] = result['R']
+                T_c2w[:3, 3:4] = result['t']
 
                 kf_curr = KeyFrame(
                     frame_id=current_frame['frame_id'],
                     timestamp=current_frame['timestamp'],
-                    pose=T_cw,  # T_cw: world to camera
+                    pose=T_c2w,  # T_cw: world to camera
                     K=loader.K,
                     dist_coeffs=loader.dist_coeffs,
                     keypoints=current_frame['keypoints'],
