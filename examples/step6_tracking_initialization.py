@@ -175,7 +175,7 @@ def visualize_map_3d(slam_map, window_name="Initial Map"):
 
 
 def main():
-    dataset_path = 'data/MH_01_easy'
+    dataset_path = 'data/V1_01_easy'
 
     if not os.path.exists(dataset_path):
         print(f"Error: Dataset not found at {dataset_path}")
@@ -244,7 +244,7 @@ def main():
 
             # Skip frames for better baseline
             frame_skip += 1
-            if frame_skip < 3:  # Try initialization every 3 frames
+            if frame_skip < 10:  # Try initialization every 3 frames
                 continue
             frame_skip = 0
 
@@ -276,13 +276,15 @@ def main():
                 )
 
                 # Current KeyFrame with relative pose
-                # Initializer returns R, t as cam1 to cam2 (T_21)
-                # So T_wc2 = T_w1 @ T_12 = I @ T_12 = T_12
-                # But KeyFrame needs T_cw = T_wc^-1
-                T_wc = np.eye(4)
-                T_wc[:3, :3] = result['R']
-                T_wc[:3, 3:4] = result['t']
-                T_cw = np.linalg.inv(T_wc)
+                # Initializer returns R, t as T_21 (cam2 to cam1)
+                # T_wc1 = I (cam1 = world)
+                # T_wc2 = T_wc1 @ inv(T_21) = inv(T_21)
+                T_21 = np.eye(4)
+                T_21[:3, :3] = result['R']
+                T_21[:3, 3:4] = result['t']
+                T_wc2 = np.linalg.inv(T_21)
+                # KeyFrame needs T_cw = inv(T_wc)
+                T_cw = np.linalg.inv(T_wc2)
 
                 kf_curr = KeyFrame(
                     frame_id=current_frame['frame_id'],
