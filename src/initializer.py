@@ -353,6 +353,7 @@ class Initializer:
                 best_solution = (R, t, points_3d[valid_mask], valid_mask)
 
         if best_solution is None or max_good < self.min_triangulated:
+            print(f"  Reconstruction failed: n_good={max_good}, min_required={self.min_triangulated}")
             return False, None, None, None, None
 
         R, t, points_3d, good_mask = best_solution
@@ -396,6 +397,7 @@ class Initializer:
         n_good = np.sum(valid_mask)
 
         if n_good < self.min_triangulated:
+            print(f"  Reconstruction failed: n_good={n_good}, min_required={self.min_triangulated}")
             return False, None, None, None, None
 
         # Update mask
