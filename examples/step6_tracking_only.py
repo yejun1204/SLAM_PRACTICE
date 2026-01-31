@@ -256,6 +256,7 @@ def main():
     # State machine
     state = "NOT_INITIALIZED"
     ref_frame = None
+    initializer = None
     frame_skip = 0
     trajectory = []  # Camera positions in world frame
 
@@ -280,6 +281,8 @@ def main():
             # Initialization phase
             if ref_frame is None:
                 ref_frame = current_frame
+                # Create initializer once with reference frame
+                initializer = Initializer(ref_frame, loader.K, loader.dist_coeffs)
                 print(f"\n[Frame {idx}] Set as reference frame")
                 print(f"  Features: {len(keypoints)}")
                 continue
@@ -291,9 +294,6 @@ def main():
             frame_skip = 0
 
             print(f"\n[Frame {idx}] Attempting initialization...")
-
-            # Create initializer
-            initializer = Initializer(ref_frame, loader.K, loader.dist_coeffs)
 
             # Attempt initialization
             success, result = initializer.initialize(current_frame, ratio_thresh=0.75)
