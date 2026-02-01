@@ -181,6 +181,7 @@ class Tracking:
         # Get 3D-2D correspondences
         pts_3d = []
         pts_2d = []
+        matched_indices = []  # current frame의 keypoint 인덱스 추적
 
         for m in good_matches:
             last_idx = m.queryIdx
@@ -191,6 +192,7 @@ class Tracking:
             if mappoint is not None and not mappoint.is_bad:
                 pts_3d.append(mappoint.get_position().ravel())
                 pts_2d.append(self.current_frame['keypoints'][curr_idx].pt)
+                matched_indices.append(curr_idx)
 
                 # Store matched MapPoint
                 self.current_frame['mappoints'][curr_idx] = mappoint
@@ -226,9 +228,9 @@ class Tracking:
 
         # Clear MapPoints that are outliers
         inlier_set = set(inliers.ravel())
-        for i, mappoint in enumerate(self.current_frame['mappoints']):
-            if mappoint is not None and i not in inlier_set:
-                self.current_frame['mappoints'][i] = None
+        for i, curr_idx in enumerate(matched_indices):
+            if i not in inlier_set:
+                self.current_frame['mappoints'][curr_idx] = None
 
         return True
 
@@ -478,7 +480,7 @@ class Tracking:
             self.last_pose = self.last_frame['pose'].copy()
             # velocity = T_curr @ T_last^{-1}
             T_last_inv = np.linalg.inv(self.last_pose)
-            self.velocity = self.current_pose @ T_last_inv
+            self.velocity = self.current_pose @ T_last_inv # T_cc-1
         else:
             self.velocity = np.eye(4)
 
