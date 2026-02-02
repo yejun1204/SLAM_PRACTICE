@@ -411,7 +411,7 @@ def main():
 
                 # Visualize
                 img_vis = visualize_tracking(
-                    img, keypoints, tracking.current_frame['mappoints'],
+                    img, tracking.current_frame['keypoints'], tracking.current_frame['mappoints'],
                     tracking.get_state(), n_tracked, pose
                 )
                 cv2.imshow("Tracking", img_vis)
