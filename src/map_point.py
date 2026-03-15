@@ -98,7 +98,9 @@ class MapPoint:
         """Mark this MapPoint as bad (for removal)"""
         with self.lock:
             self.is_bad = True
-            # Clear observations
+            # Remove this MapPoint from all observing KeyFrames
+            for kf, idx in self.observations.items():
+                kf.remove_mappoint(idx)
             self.observations.clear()
 
     def is_bad_point(self):

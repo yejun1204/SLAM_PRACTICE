@@ -327,12 +327,16 @@ class Tracking:
 
         # Project local MapPoints and search for matches
         new_matches = 0
+        already_matched = set(id(mp) for mp in self.current_frame['mappoints'] if mp is not None)
+
         for mappoint in local_mappoints:
             if mappoint.is_bad:
                 continue
 
             # Skip if already matched
-            if mappoint in self.current_frame['mappoints']:
+            if id(mappoint) in already_matched:
+                mappoint.increase_visible()
+                mappoint.increase_found()
                 continue
 
             # Project to current frame
@@ -341,6 +345,8 @@ class Tracking:
 
             if not is_visible:
                 continue
+
+            mappoint.increase_visible()
 
             # Search in radius for match
             idx = self._search_in_radius(
@@ -352,6 +358,7 @@ class Tracking:
 
             if idx is not None:
                 self.current_frame['mappoints'][idx] = mappoint
+                mappoint.increase_found()
                 new_matches += 1
 
         # Optimize pose with all matches
@@ -548,6 +555,24 @@ class Tracking:
             self.velocity = np.eye(4)
             self.frames_since_last_kf = 0
             print("[Tracking] Initialized!")
+
+    def update_reference_keyframe(self, keyframe):
+        """
+        Update reference KeyFrame used for tracking fallback.
+
+        Args:
+            keyframe: KeyFrame object (newly created by LocalMapping)
+        """
+        with self.lock:
+            self.reference_keyframe = {
+                'frame_id': keyframe.frame_id,
+                'timestamp': keyframe.timestamp,
+                'keypoints': keyframe.keypoints,
+                'descriptors': keyframe.descriptors,
+                'image': keyframe.image,
+                'pose': keyframe.get_pose(),
+                'mappoints': keyframe.get_mappoints()
+            }
 
     def get_state(self):
         """Get current tracking state"""
