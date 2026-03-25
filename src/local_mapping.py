@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import threading
 from scipy.optimize import least_squares
+from scipy.sparse import lil_matrix
 
 from src.keyframe import KeyFrame
 from src.map_point import MapPoint
@@ -448,10 +449,20 @@ class LocalMapping:
 
             return residuals
 
-        # 8. Optimize
+        # 8. Build sparsity matrix for Jacobian
+        sparsity = lil_matrix((2 * len(observations), n_params), dtype=int)
+        for obs_idx, (kf_obs, mp, _) in enumerate(observations):
+            if kf_obs in kf_param_index:
+                kf_i = kf_param_index[kf_obs]
+                sparsity[obs_idx*2:obs_idx*2+2, kf_i:kf_i+6] = 1
+            mp_i = mp_param_index[mp]
+            sparsity[obs_idx*2:obs_idx*2+2, mp_i:mp_i+3] = 1
+
+        # 9. Optimize
         result = least_squares(
             compute_residuals,
             x0,
+            jac_sparsity=sparsity,
             method='trf',
             loss='huber',
             f_scale=1.0,
@@ -459,7 +470,7 @@ class LocalMapping:
             verbose=0
         )
 
-        # 9. Apply optimized values
+        # 10. Apply optimized values
         x_opt = result.x
 
         for kf in opt_kfs:
