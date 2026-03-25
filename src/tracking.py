@@ -118,6 +118,7 @@ class Tracking:
 
                 if not success:
                     # Fall back to reference KeyFrame
+                    self.current_frame['mappoints'] = [None] * len(self.current_frame['keypoints'])
                     success = self._track_reference_keyframe()
 
                 if success:
