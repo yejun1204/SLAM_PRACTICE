@@ -158,6 +158,11 @@ class Tracking:
         if self.last_frame is None:
             return False
 
+        # Reject unreliable velocity (large translation jump)
+        velocity_translation = np.linalg.norm(self.velocity[:3, 3])
+        if velocity_translation > 1.0:
+            return False
+
         # Predict current pose using velocity
         predicted_pose = self.velocity @ self.last_pose
 
@@ -349,27 +354,31 @@ class Tracking:
 
             mappoint.increase_visible()
 
-            # Search in radius for match
+            # Search in radius for match (skip already-matched keypoints)
             idx = self._search_in_radius(
                 pt_2d, mappoint.descriptor,
                 self.current_frame['keypoints'],
                 self.current_frame['descriptors'],
-                radius=15.0
+                radius=15.0,
+                matched_mask=self.current_frame['mappoints']
             )
 
             if idx is not None:
                 self.current_frame['mappoints'][idx] = mappoint
+                already_matched.add(id(mappoint))
                 mappoint.increase_found()
                 new_matches += 1
 
         # Optimize pose with all matches
         pts_3d = []
         pts_2d = []
+        kp_indices = []
 
         for i, mappoint in enumerate(self.current_frame['mappoints']):
             if mappoint is not None and not mappoint.is_bad:
                 pts_3d.append(mappoint.get_position().ravel())
                 pts_2d.append(self.current_frame['keypoints'][i].pt)
+                kp_indices.append(i)
 
         if len(pts_3d) < self.min_tracked_points:
             return False
@@ -377,23 +386,34 @@ class Tracking:
         pts_3d = np.array(pts_3d, dtype=np.float32)
         pts_2d = np.array(pts_2d, dtype=np.float32)
 
-        # Refine pose
+        # Refine pose with RANSAC to reject outlier MapPoints
         rvec, _ = cv2.Rodrigues(self.current_pose[:3, :3])
         tvec = self.current_pose[:3, 3:4]
 
-        success, rvec, tvec = cv2.solvePnP(
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
             pts_3d, pts_2d, self.K, self.dist_coeffs,
             rvec, tvec,
             useExtrinsicGuess=True,
+            iterationsCount=100,
+            reprojectionError=2.0,
+            confidence=0.99,
             flags=cv2.SOLVEPNP_ITERATIVE
         )
 
-        if success:
-            R, _ = cv2.Rodrigues(rvec)
-            self.current_pose[:3, :3] = R
-            self.current_pose[:3, 3:4] = tvec
+        if not success or inliers is None or len(inliers) < self.min_inliers:
+            return False
 
-        return len(pts_3d) >= self.min_tracked_points
+        R, _ = cv2.Rodrigues(rvec)
+        self.current_pose[:3, :3] = R
+        self.current_pose[:3, 3:4] = tvec
+
+        # Remove outlier MapPoints from current frame
+        inlier_set = set(inliers.ravel())
+        for list_idx, kp_idx in enumerate(kp_indices):
+            if list_idx not in inlier_set:
+                self.current_frame['mappoints'][kp_idx] = None
+
+        return len(inliers) >= self.min_tracked_points
 
     def _relocalize(self):
         """
@@ -446,7 +466,8 @@ class Tracking:
 
         return pt_2d, True
 
-    def _search_in_radius(self, pt_2d, descriptor, keypoints, descriptors, radius):
+    def _search_in_radius(self, pt_2d, descriptor, keypoints, descriptors, radius,
+                          matched_mask=None):
         """
         Search for matching feature in radius around projected point
 
@@ -456,6 +477,7 @@ class Tracking:
             keypoints: Frame keypoints
             descriptors: Frame descriptors
             radius: Search radius in pixels
+            matched_mask: List of MapPoint-or-None per keypoint; skip occupied slots
 
         Returns:
             idx: Index of best match, or None if no match found
@@ -464,6 +486,10 @@ class Tracking:
         best_idx = None
 
         for i, kp in enumerate(keypoints):
+            # Skip already-matched keypoints
+            if matched_mask is not None and matched_mask[i] is not None:
+                continue
+
             # Check if in radius
             dist = np.linalg.norm(np.array(kp.pt) - pt_2d)
             if dist > radius:

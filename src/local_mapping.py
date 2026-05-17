@@ -127,13 +127,13 @@ class LocalMapping:
         pose_curr = kf_curr.get_pose()
         center_curr = kf_curr.get_camera_center().ravel()
 
-        # Get covisible KeyFrames
-        covisible_kfs = kf_curr.get_best_covisible_keyframes(n=20)
+        # Get covisible KeyFrames (limit to top 5 to avoid too many low-quality points)
+        covisible_kfs = kf_curr.get_best_covisible_keyframes(n=5)
 
         # Fall back to all KFs if not enough covisible
         if len(covisible_kfs) < 2:
             covisible_kfs = [kf for kf in self.map.get_all_keyframes()
-                             if kf != kf_curr]
+                             if kf != kf_curr][-5:]
 
         n_new = 0
 
@@ -211,7 +211,7 @@ class LocalMapping:
                 if norm_curr < 1e-6 or norm_neigh < 1e-6:
                     continue
                 cos_parallax = (ray_curr @ ray_neigh) / (norm_curr * norm_neigh)
-                if cos_parallax > 0.9998:  # < ~1.1 degrees
+                if cos_parallax > 0.9994:  # < ~2.0 degrees
                     continue
 
                 # Create MapPoint
