@@ -11,8 +11,7 @@ Processes new KeyFrames inserted by Tracking:
 import cv2
 import numpy as np
 import threading
-from scipy.optimize import least_squares
-from scipy.sparse import lil_matrix
+import gtsam
 
 from src.keyframe import KeyFrame
 from src.map_point import MapPoint
@@ -98,6 +97,7 @@ class LocalMapping:
             if mp is not None and not mp.is_bad:
                 kf.add_mappoint(mp, i)
                 mp.add_observation(kf, i)
+                mp.update_descriptor()
 
         # 3. Update covisibility graph
         kf.update_connections()
@@ -162,18 +162,18 @@ class LocalMapping:
             if len(curr_unmatched) < 10 or len(neigh_unmatched) < 10:
                 continue
 
-            # Extract descriptors for unmatched features
+            # Compute Fundamental matrix (curr → neighbor)
+            F = self._compute_fundamental_matrix(pose_curr, pose_neighbor)
+
+            # Epipolar-constrained matching
+            kps_curr = [kf_curr.keypoints[i] for i in curr_unmatched]
+            kps_neigh = [kf_neighbor.keypoints[i] for i in neigh_unmatched]
             desc_curr = kf_curr.descriptors[curr_unmatched]
             desc_neigh = kf_neighbor.descriptors[neigh_unmatched]
 
-            # Match with Lowe's ratio test
-            matches_raw = self.matcher.knnMatch(desc_curr, desc_neigh, k=2)
-            good_matches = []
-            for match_pair in matches_raw:
-                if len(match_pair) == 2:
-                    m, n = match_pair
-                    if m.distance < 0.7 * n.distance:
-                        good_matches.append(m)
+            good_matches = self._match_with_epipolar(
+                F, kps_curr, desc_curr, kps_neigh, desc_neigh
+            )
 
             if len(good_matches) < 5:
                 continue
@@ -214,6 +214,14 @@ class LocalMapping:
                 if cos_parallax > 0.9994:  # < ~2.0 degrees
                     continue
 
+                # Depth ratio check: reject points too far relative to baseline
+                # If depth >> baseline, triangulation is unreliable
+                depth_curr = (pose_curr[:3, :3] @ pt_3d + pose_curr[:3, 3])[2]
+                if depth_curr <= 0:
+                    continue
+                if depth_curr > baseline * 500:
+                    continue
+
                 # Create MapPoint
                 idx_in_curr = curr_unmatched[m.queryIdx]
                 idx_in_neigh = neigh_unmatched[m.trainIdx]
@@ -226,6 +234,10 @@ class LocalMapping:
 
                 mp.add_observation(kf_curr, idx_in_curr)
                 mp.add_observation(kf_neighbor, idx_in_neigh)
+                mp.update_descriptor()
+                # Credit the two creation observations so found_ratio starts at 1.0
+                mp.increase_visible(2)
+                mp.increase_found(2)
 
                 kf_curr.add_mappoint(mp, idx_in_curr)
                 kf_neighbor.add_mappoint(mp, idx_in_neigh)
@@ -242,6 +254,62 @@ class LocalMapping:
                 kf_neighbor.update_connections()
 
         return n_new
+
+    def _compute_fundamental_matrix(self, pose1, pose2):
+        """Compute fundamental matrix F mapping points from camera1 to epipolar lines in camera2."""
+        R1, t1 = pose1[:3, :3], pose1[:3, 3]
+        R2, t2 = pose2[:3, :3], pose2[:3, 3]
+
+        # Relative pose: camera1 → camera2
+        R_21 = R2 @ R1.T
+        t_21 = t2 - R_21 @ t1
+
+        # Skew-symmetric matrix of t_21
+        tx = np.array([[0, -t_21[2], t_21[1]],
+                       [t_21[2], 0, -t_21[0]],
+                       [-t_21[1], t_21[0], 0]])
+
+        K_inv = np.linalg.inv(self.K)
+        F = K_inv.T @ tx @ R_21 @ K_inv
+        return F
+
+    def _match_with_epipolar(self, F, kps1, desc1, kps2, desc2,
+                              epi_threshold=3.0, desc_threshold=50):
+        """
+        Match features using epipolar constraint.
+        For each feature in kps1, compute epipolar line in image2,
+        then search for best descriptor match among features near that line.
+        """
+        import cv2
+
+        matches = []
+        for i, (kp1, d1) in enumerate(zip(kps1, desc1)):
+            p1 = np.array([kp1.pt[0], kp1.pt[1], 1.0])
+            line = F @ p1  # epipolar line in image2: ax + by + c = 0
+            a, b, c = line
+            denom = np.sqrt(a * a + b * b)
+            if denom < 1e-6:
+                continue
+
+            best_dist = desc_threshold
+            best_j = -1
+
+            for j, (kp2, d2) in enumerate(zip(kps2, desc2)):
+                # Epipolar distance
+                epi_dist = abs(a * kp2.pt[0] + b * kp2.pt[1] + c) / denom
+                if epi_dist > epi_threshold:
+                    continue
+
+                # Descriptor distance
+                dist = cv2.norm(d1, d2, cv2.NORM_HAMMING)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_j = j
+
+            if best_j >= 0:
+                matches.append(cv2.DMatch(i, best_j, best_dist))
+
+        return matches
 
     def _compute_median_depth(self, keyframe):
         """Compute median depth of MapPoints observed from a KeyFrame."""
@@ -300,12 +368,12 @@ class LocalMapping:
 
             kf_age = current_kf_id - mp.ref_keyframe.id
 
-            if kf_age >= 2 and mp.num_observations() <= 2:
+            if kf_age >= 3 and mp.num_observations() <= 2:
                 mp.set_bad_flag()
                 n_culled += 1
                 continue
 
-            if kf_age >= 3:
+            if kf_age >= 4:
                 # Survived the probation period
                 continue
 
@@ -318,29 +386,20 @@ class LocalMapping:
 
     def local_bundle_adjustment(self, n_local_kfs=10):
         """
-        Optimize local KeyFrame poses and MapPoint positions jointly.
-
-        Uses scipy.optimize.least_squares with Huber loss to minimize
-        reprojection errors in a local window around the current KeyFrame.
-
-        Args:
-            n_local_kfs: Max number of covisible KFs to optimize
-
-        Returns:
-            dict with optimization statistics
+        Optimize local KeyFrame poses and MapPoint positions jointly using gtsam.
         """
         kf_curr = self.current_keyframe
         if kf_curr is None:
             return {'skipped': True}
 
-        # 1. Collect LOCAL KeyFrames (to optimize)
+        # 1. Collect local KFs
         local_kfs = [kf_curr]
         for kf in kf_curr.get_best_covisible_keyframes(n=n_local_kfs):
             if not kf.is_bad:
                 local_kfs.append(kf)
         local_kf_set = set(local_kfs)
 
-        # 2. Collect LOCAL MapPoints (observed by local KFs)
+        # 2. Collect local MPs
         local_mps = set()
         for kf in local_kfs:
             for mp in kf.get_valid_mappoints():
@@ -348,150 +407,127 @@ class LocalMapping:
         local_mps = list(local_mps)
 
         if len(local_mps) < 10:
-            return {'skipped': True, 'n_local_kfs': len(local_kfs), 'n_local_mps': len(local_mps)}
+            return {'skipped': True}
 
-        # 3. Collect FIXED KeyFrames (observe local MPs but not in local set)
-        # Also fix the origin KF to prevent gauge freedom
+        # 3. Fixed KFs
         first_kf = self.map.get_reference_keyframe()
         fixed_kfs = set()
-
         for mp in local_mps:
             for kf_obs in mp.get_observations().keys():
                 if kf_obs not in local_kf_set and not kf_obs.is_bad:
                     fixed_kfs.add(kf_obs)
-
-        # Origin KF is always fixed
         if first_kf in local_kf_set:
             fixed_kfs.add(first_kf)
-
         fixed_kfs = list(fixed_kfs)
 
-        # KFs to optimize = local KFs minus fixed
         opt_kfs = [kf for kf in local_kfs if kf not in fixed_kfs]
-
         if len(opt_kfs) == 0:
-            return {'skipped': True, 'n_local_kfs': len(local_kfs), 'n_local_mps': len(local_mps)}
+            return {'skipped': True}
 
-        # 4. Build parameter vector: [kf0_rvec, kf0_tvec, ..., mp0_xyz, ...]
-        kf_param_index = {}
-        mp_param_index = {}
+        # Gauge freedom: fix at least one KF if no fixed KFs
+        if len(fixed_kfs) == 0:
+            fixed_kfs = [opt_kfs[0]]
+            opt_kfs = opt_kfs[1:]
+            if len(opt_kfs) == 0:
+                return {'skipped': True}
 
-        idx = 0
-        for kf in opt_kfs:
-            kf_param_index[kf] = idx
-            idx += 6
+        # 4. gtsam setup
+        fx, fy = float(self.K[0, 0]), float(self.K[1, 1])
+        cx, cy = float(self.K[0, 2]), float(self.K[1, 2])
+        cal = gtsam.Cal3_S2(fx, fy, 0.0, cx, cy)
 
-        for mp in local_mps:
-            mp_param_index[mp] = idx
-            idx += 3
-
-        n_params = idx
-
-        # 5. Initial parameter vector
-        x0 = np.zeros(n_params)
-        for kf in opt_kfs:
-            pose = kf.get_pose()
-            rvec, _ = cv2.Rodrigues(pose[:3, :3])
-            i = kf_param_index[kf]
-            x0[i:i+3] = rvec.ravel()
-            x0[i+3:i+6] = pose[:3, 3].ravel()
-
-        for mp in local_mps:
-            i = mp_param_index[mp]
-            x0[i:i+3] = mp.get_position().ravel()
-
-        # 6. Build observation list
-        fixed_kf_poses = {kf: kf.get_pose() for kf in fixed_kfs}
-        observations = []
-
-        for mp in local_mps:
-            for kf_obs, kp_idx in mp.get_observations().items():
-                if kf_obs in kf_param_index or kf_obs in fixed_kf_poses:
-                    pt_2d = np.array(kf_obs.keypoints[kp_idx].pt, dtype=np.float64)
-                    observations.append((kf_obs, mp, pt_2d))
-
-        if len(observations) < 10:
-            return {'skipped': True, 'n_local_kfs': len(opt_kfs), 'n_local_mps': len(local_mps)}
-
-        K = self.K
-
-        # 7. Residual function
-        def compute_residuals(x):
-            residuals = np.zeros(len(observations) * 2)
-
-            for obs_idx, (kf_obs, mp, pt_2d_obs) in enumerate(observations):
-                # KF pose
-                if kf_obs in kf_param_index:
-                    i = kf_param_index[kf_obs]
-                    R, _ = cv2.Rodrigues(x[i:i+3])
-                    t = x[i+3:i+6]
-                else:
-                    pose = fixed_kf_poses[kf_obs]
-                    R = pose[:3, :3]
-                    t = pose[:3, 3]
-
-                # MP position
-                mp_i = mp_param_index[mp]
-                pt_3d = x[mp_i:mp_i+3]
-
-                # Project
-                pt_cam = R @ pt_3d + t
-                if pt_cam[2] <= 1e-6:
-                    residuals[obs_idx*2] = 100.0
-                    residuals[obs_idx*2+1] = 100.0
-                    continue
-
-                pt_proj = K @ pt_cam
-                pt_proj_2d = pt_proj[:2] / pt_proj[2]
-
-                residuals[obs_idx*2] = pt_proj_2d[0] - pt_2d_obs[0]
-                residuals[obs_idx*2+1] = pt_proj_2d[1] - pt_2d_obs[1]
-
-            return residuals
-
-        # 8. Build sparsity matrix for Jacobian
-        sparsity = lil_matrix((2 * len(observations), n_params), dtype=int)
-        for obs_idx, (kf_obs, mp, _) in enumerate(observations):
-            if kf_obs in kf_param_index:
-                kf_i = kf_param_index[kf_obs]
-                sparsity[obs_idx*2:obs_idx*2+2, kf_i:kf_i+6] = 1
-            mp_i = mp_param_index[mp]
-            sparsity[obs_idx*2:obs_idx*2+2, mp_i:mp_i+3] = 1
-
-        # 9. Optimize
-        result = least_squares(
-            compute_residuals,
-            x0,
-            jac_sparsity=sparsity,
-            method='trf',
-            loss='huber',
-            f_scale=1.0,
-            max_nfev=50,
-            verbose=0
+        huber = gtsam.noiseModel.mEstimator.Huber.Create(2.0)
+        noise = gtsam.noiseModel.Robust.Create(
+            huber, gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
         )
+        prior_noise = gtsam.noiseModel.Diagonal.Sigmas(np.ones(6) * 1e-6)
 
-        # 10. Apply optimized values
-        x_opt = result.x
+        graph = gtsam.NonlinearFactorGraph()
+        initial = gtsam.Values()
 
+        def pose_key(kf):
+            return gtsam.symbol('x', kf.id)
+
+        def point_key(i):
+            return gtsam.symbol('l', i)
+
+        def to_gtsam_pose(T_cw):
+            R_cw = T_cw[:3, :3]
+            t_cw = T_cw[:3, 3]
+            R_wc = R_cw.T
+            t_wc = -R_cw.T @ t_cw
+            return gtsam.Pose3(gtsam.Rot3(R_wc), gtsam.Point3(t_wc))
+
+        # 5. Insert pose variables
+        all_kfs = opt_kfs + list(fixed_kfs)
+        for kf in all_kfs:
+            initial.insert(pose_key(kf), to_gtsam_pose(kf.get_pose()))
+
+        # Fix KFs with strong prior
+        for kf in fixed_kfs:
+            graph.add(gtsam.PriorFactorPose3(
+                pose_key(kf), initial.atPose3(pose_key(kf)), prior_noise
+            ))
+
+        # 6. Insert point variables and projection factors
+        fixed_kf_set = set(fixed_kfs)
+        n_factors = 0
+        mp_idx_map = {}
+
+        for i, mp in enumerate(local_mps):
+            mp_idx_map[mp] = i
+            initial.insert(point_key(i), gtsam.Point3(mp.get_position().ravel().astype(float)))
+
+            for kf_obs, kp_idx in mp.get_observations().items():
+                if kf_obs.is_bad:
+                    continue
+                if kf_obs not in local_kf_set and kf_obs not in fixed_kf_set:
+                    continue
+                pt = kf_obs.keypoints[kp_idx].pt
+                graph.add(gtsam.GenericProjectionFactorCal3_S2(
+                    gtsam.Point2(float(pt[0]), float(pt[1])),
+                    noise, pose_key(kf_obs), point_key(i), cal
+                ))
+                n_factors += 1
+
+        if n_factors < 10:
+            return {'skipped': True}
+
+        # 7. Optimize
+        cost_before = graph.error(initial)
+        try:
+            params = gtsam.LevenbergMarquardtParams()
+            params.setMaxIterations(20)
+            result = gtsam.LevenbergMarquardtOptimizer(graph, initial, params).optimize()
+        except Exception as e:
+            return {'skipped': True, 'reason': str(e)}
+
+        cost_after = graph.error(result)
+        if cost_after > cost_before * 1.5:
+            return {'skipped': True, 'reason': 'BA diverged'}
+
+        # 8. Apply results
         for kf in opt_kfs:
-            i = kf_param_index[kf]
-            R, _ = cv2.Rodrigues(x_opt[i:i+3])
+            pose = result.atPose3(pose_key(kf))
+            R_wc = pose.rotation().matrix()
+            t_wc = pose.translation()
+            R_cw = R_wc.T
+            t_cw = -R_wc.T @ t_wc
             new_pose = np.eye(4)
-            new_pose[:3, :3] = R
-            new_pose[:3, 3] = x_opt[i+3:i+6]
+            new_pose[:3, :3] = R_cw
+            new_pose[:3, 3] = t_cw
             kf.set_pose(new_pose)
 
         for mp in local_mps:
-            i = mp_param_index[mp]
-            mp.set_position(x_opt[i:i+3])
+            pt = result.atPoint3(point_key(mp_idx_map[mp]))
+            mp.set_position(np.array(pt))
 
         return {
             'skipped': False,
             'n_opt_kfs': len(opt_kfs),
             'n_fixed_kfs': len(fixed_kfs),
             'n_local_mps': len(local_mps),
-            'n_observations': len(observations),
-            'cost': float(result.cost),
-            'success': bool(result.success),
-            'n_evaluations': result.nfev
+            'n_observations': n_factors,
+            'cost_before': cost_before,
+            'cost_after': cost_after,
         }

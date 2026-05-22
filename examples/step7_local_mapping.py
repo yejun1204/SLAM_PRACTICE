@@ -14,18 +14,35 @@ from src.initializer import Initializer
 from src.map_point import MapPoint
 from src.keyframe import KeyFrame
 from src.map import Map
-from src.tracking import Tracking, TrackingState
+from src.tracking import Tracking, TrackingState, grid_distribute
 from src.local_mapping import LocalMapping
 
 
-def visualize_tracking(img, keypoints, mappoints, state, n_tracked, pose):
+def visualize_tracking(img, keypoints, mappoints, state, n_tracked, pose, K=None):
     """Visualize tracking result on image"""
     img_vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    h, w = img.shape[:2]
 
     for i, kp in enumerate(keypoints):
         pt = tuple(map(int, kp.pt))
         if mappoints[i] is not None:
             cv2.circle(img_vis, pt, 3, (0, 255, 0), -1)
+
+            # Reprojection error visualization
+            if pose is not None and K is not None and not mappoints[i].is_bad:
+                pt_3d = mappoints[i].get_position().ravel()
+                pt_cam = pose[:3, :3] @ pt_3d + pose[:3, 3]
+                if pt_cam[2] > 0:
+                    proj = K @ pt_cam
+                    px, py = proj[0] / proj[2], proj[1] / proj[2]
+                    if 0 <= px < w and 0 <= py < h:
+                        proj_pt = (int(px), int(py))
+                        err = np.sqrt((px - kp.pt[0])**2 + (py - kp.pt[1])**2)
+                        # 선 색상: 오차 작으면 초록, 크면 빨강 (threshold 3px)
+                        line_color = (0, 255, 0) if err < 3.0 else (0, 100, 255)
+                        cv2.line(img_vis, proj_pt, pt, line_color, 1)
+                        cv2.circle(img_vis, proj_pt, 2, (255, 255, 0), -1)
         else:
             cv2.circle(img_vis, pt, 2, (0, 0, 255), 1)
 
@@ -206,7 +223,7 @@ def main():
     # Create components
     slam_map = Map()
     n_features = 2000
-    orb = cv2.ORB_create(nfeatures=n_features)
+    orb = cv2.ORB_create(nfeatures=n_features * 3)
 
     tracking = Tracking(slam_map, loader.K, loader.dist_coeffs, {'nfeatures': n_features})
     local_mapping = LocalMapping(slam_map, loader.K, loader.dist_coeffs)
@@ -232,6 +249,9 @@ def main():
         keypoints, descriptors = orb.detectAndCompute(img, None)
         if descriptors is None:
             continue
+        if len(keypoints) > n_features:
+            keypoints, descriptors = grid_distribute(
+                keypoints, descriptors, img.shape, n_features)
 
         current_frame = {
             'image': img,
@@ -403,9 +423,22 @@ def main():
 
                 img_vis = visualize_tracking(
                     img, tracking.current_frame['keypoints'], tracking.current_frame['mappoints'],
-                    tracking.get_state(), n_tracked, pose
+                    tracking.get_state(), n_tracked, pose, K=loader.K
                 )
                 cv2.imshow("Tracking", img_vis)
+
+                # Reference KF match visualization
+                match_data = tracking.get_ref_match_viz_data()
+                if match_data is not None and len(match_data['matches']) > 0:
+                    match_img = cv2.drawMatches(
+                        match_data['ref_image'], match_data['ref_keypoints'],
+                        match_data['curr_image'], match_data['curr_keypoints'],
+                        match_data['matches'][:100], None,
+                        matchColor=(0, 255, 0),
+                        singlePointColor=(0, 0, 255),
+                        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                    )
+                    cv2.imshow("Ref KF Matches", match_img)
 
                 visualize_trajectory_3d(slam_map, trajectory, "Trajectory")
 

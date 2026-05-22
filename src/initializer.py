@@ -127,7 +127,28 @@ class Initializer:
 
         n_good = len(points_3d)
 
-        print(f"  Parallax: {parallax:.2f} deg, triangulated points: {n_good}")
+        # Compute mean reprojection error for successful points
+        if n_good > 0:
+            good_pts1 = ref_pts_undist[mask.ravel().astype(bool)]
+            good_pts2 = curr_pts_undist[mask.ravel().astype(bool)]
+            t_used = t.ravel()
+
+            errors = []
+            for i, pt in enumerate(points_3d):
+                pt_proj1 = self.K @ pt
+                pt_proj1 = pt_proj1[:2] / pt_proj1[2]
+                err1 = np.sqrt(np.sum((pt_proj1 - good_pts1[i]) ** 2))
+
+                pt_proj2 = self.K @ (R @ pt + t_used)
+                pt_proj2 = pt_proj2[:2] / pt_proj2[2]
+                err2 = np.sqrt(np.sum((pt_proj2 - good_pts2[i]) ** 2))
+
+                errors.append((err1 + err2) / 2)
+            mean_err = float(np.mean(errors))
+        else:
+            mean_err = float('inf')
+
+        print(f"  Parallax: {parallax:.2f} deg, triangulated points: {n_good}, mean reproj error: {mean_err:.2f} px")
 
         if parallax < self.min_parallax:
             print(f"  Insufficient parallax (< {self.min_parallax} deg)")
@@ -444,6 +465,24 @@ class Initializer:
         depths2 = points_3d_cam2[:, 2]
 
         valid_mask = (depths1 > 0) & (depths2 > 0)
+
+        # Reprojection error check
+        for i in range(len(points_3d)):
+            if not valid_mask[i]:
+                continue
+
+            # Camera 1 reprojection
+            pt_proj1 = self.K @ points_3d_cam1[i]
+            pt_proj1 = pt_proj1[:2] / pt_proj1[2]
+            err1 = np.sum((pt_proj1 - pts1[i]) ** 2)
+
+            # Camera 2 reprojection
+            pt_proj2 = self.K @ points_3d_cam2[i]
+            pt_proj2 = pt_proj2[:2] / pt_proj2[2]
+            err2 = np.sum((pt_proj2 - pts2[i]) ** 2)
+
+            if err1 > 5.991 or err2 > 5.991:
+                valid_mask[i] = False
 
         return points_3d, valid_mask
 

@@ -14,6 +14,7 @@ from src.initializer import Initializer
 from src.map_point import MapPoint
 from src.keyframe import KeyFrame
 from src.map import Map
+from src.tracking import grid_distribute
 
 
 def visualize_initialization(ref_img, curr_img, ref_kp, curr_kp, matches, mask, model):
@@ -191,9 +192,9 @@ def main():
     print(f"\nCamera matrix K:")
     print(loader.K)
 
-    # Create ORB detector
+    # Create ORB detector (dense: detect more, then grid-distribute)
     n_features = 2000
-    orb = cv2.ORB_create(nfeatures=n_features)
+    orb = cv2.ORB_create(nfeatures=n_features * 3)
 
     print(f"\nORB Configuration:")
     print(f"  Max features: {n_features}")
@@ -213,10 +214,13 @@ def main():
         if img is None:
             continue
 
-        # Extract ORB features
+        # Extract ORB features with grid distribution
         keypoints, descriptors = orb.detectAndCompute(img, None)
         if descriptors is None:
             continue
+        if len(keypoints) > n_features:
+            keypoints, descriptors = grid_distribute(
+                keypoints, descriptors, img.shape, n_features)
 
         current_frame = {
             'image': img,
